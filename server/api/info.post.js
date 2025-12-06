@@ -1,39 +1,16 @@
 import { readBody } from "h3"
-import * as cheerio from "cheerio"
-import { v4 as uuidv4 } from "uuid"
 import nodeFetch from "node-fetch"
-import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3"
 
 export const runtime = "nodejs"
-
-// R2 클라이언트 생성
-function createR2Client(config) {
-  return new S3Client({
-    region: "auto",   // R2는 region 의미 없음 → 아무 값이나 가능wwwwwwwwwwwwww
-    endpoint: `https://${config.accountId}.r2.cloudflarestorage.com`,
-    credentials: {
-      accessKeyId: config.accessKey,
-      secretAccessKey: config.secretKey,
-    },
-  })
-}
 
 
 export default defineEventHandler(async (event) => {
   const { url: instaUrl } = await readBody(event)
-  const config = useRuntimeConfig().r2
-
 
 
   if (!instaUrl || !instaUrl.includes("instagram.com")) {
     return { error: "올바른 Instagram URL을 입력해주세요." }
   }
-
-
-  try {
-    // ---------------------------------------------------------
-    // 1) 인스타그램 HTML 요청
-    // ---------------------------------------------------------
     const res = await nodeFetch(instaUrl, {
       headers: {
         "User-Agent":
@@ -50,127 +27,16 @@ export default defineEventHandler(async (event) => {
       }
     })
 
-    let previewUrl = "";
-
-
     const html = await res.text();
 
     let { title, author, tags } = parseFromHtml(html);   
-    
-    const $ = cheerio.load(html)
 
-
-    // OG 이미지
-    const ogImage = $('meta[property="og:image"]').attr("content")
-    if (!ogImage) throw new Error("OG:image를 찾을 수 없음")
-
-    // ---------------------------------------------------------
-    // ⭐ Instagram 메타 JSON 파싱 (내용/작성자/시간)
-    // ---------------------------------------------------------
-
-    // timestamp
-    const timestamp = Date.now()
-    const name = `insta_${timestamp}_${uuidv4()}`
-
-    // ---------------------------------------------------------
-    // 2) 이미지 다운로드
-    // ---------------------------------------------------------
-    const imgRes = await nodeFetch(ogImage)
-    const imgBuffer = Buffer.from(await imgRes.arrayBuffer())
-
-    // R2 업로드
-    const r2 = createR2Client(config)
-    const imgKey = `images/${name}.jpg`
-    await r2.send(
-      new PutObjectCommand({
-        Bucket: config.bucket,
-        Key: imgKey,
-        Body: imgBuffer,
-        ContentType: "image/jpeg",
-      })
-    )
-
-    const imageUrl = `https://pub-335f8afbae124f10a1afd0acc4e424b8.r2.dev/${imgKey}`
-
-    // ---------------------------------------------------------
-    // 3) HTML 생성 (OG 태그 강화)
-    // ---------------------------------------------------------
-    const limitedTags = tags && tags.length > 0 ? tags.slice(0, 3).join(' ') : '';
-    const descriptionText = `${author || "인스타그램 작성자"} ${limitedTags}`;
-
-    const previewHtml = `
-    <!DOCTYPE html>
-    <html lang="ko">
-    <head>
-      <meta charset="utf-8" />
-
-      <!-- OG 태그 (카톡 미리보기용) -->
-      <meta property="og:title" content="${title || "인스타그램 제목"}" />
-      <meta property="og:description" content="${descriptionText}" />
-      <meta property="og:image" content="${imageUrl}" />
-
-      <meta http-equiv="refresh" content="0; url=${instaUrl}" />
-
-      <style>
-        body { font-family: sans-serif; padding:50px; text-align:center; }
-        .info { color:#555; font-size:15px; }
-      </style>
-    </head>
-    <body>
-      <p class="info">${author}님의 Instagram 게시물로 이동 중...</p>
-      <script>location.href="${instaUrl}"</script>
-    </body>
-    </html>
-    `;
-
-
-    // R2 저장
-    const htmlKey = `htmls/${name}.html`
-    await r2.send(
-      new PutObjectCommand({
-        Bucket: config.bucket,
-        Key: htmlKey,
-        Body: previewHtml,
-        ContentType: "text/html",
-      })
-    )
-
-    previewUrl = `https://pub-335f8afbae124f10a1afd0acc4e424b8.r2.dev/${htmlKey}`
-
-    // ---------------------------------------------------------
-    // 4) 결과 반환
-    // ---------------------------------------------------------
     return {
-      previewUrl
+        title,
+        author,
+        tags
     }
-
-  } catch (err) {
-    console.error("convert API error:", err)
-    return { error: "이미지 처리 중 오류 발생" }
-  }
 })
-
-
-function decodeHtmlEntities(str = "") {
-  if (!str) return str;
-
-  return str
-    // hex: &#x1F60E;
-    .replace(/&#x([0-9A-Fa-f]+);/g, (_, hex) =>
-      String.fromCodePoint(parseInt(hex, 16))
-    )
-    // dec: &#128526;
-    .replace(/&#([0-9]+);/g, (_, dec) =>
-      String.fromCodePoint(parseInt(dec, 10))
-    )
-    // 기본 HTML 엔티티
-    .replace(/&quot;/g, '"')
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&#39;/g, "'");
-}
-
 
 /**
  * 인스타그램 HTML에서
@@ -286,4 +152,25 @@ function extractTags(html, caption) {
 
   // 4) 태그가 있으면 앞 3개만 반환
   return tags.slice(0, 3);
+}
+
+
+function decodeHtmlEntities(str = "") {
+  if (!str) return str;
+
+  return str
+    // hex: &#x1F60E;
+    .replace(/&#x([0-9A-Fa-f]+);/g, (_, hex) =>
+      String.fromCodePoint(parseInt(hex, 16))
+    )
+    // dec: &#128526;
+    .replace(/&#([0-9]+);/g, (_, dec) =>
+      String.fromCodePoint(parseInt(dec, 10))
+    )
+    // 기본 HTML 엔티티
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&#39;/g, "'");
 }
